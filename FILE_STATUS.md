@@ -30,17 +30,17 @@
 
 | 文件 | 状态 | 说明 |
 |------|------|------|
-| `session.py` | ✅ | Session 管理器 (角色加载/历史/上下文/prompt) |
+| `session.py` | ✅ | Session 管理器 (角色加载/历史/上下文/prompt/检定路由) |
 | `memory/game_state.py` | ✅ | COC 游戏状态 (Investigator/Npc/Quest/GameState) |
 | `memory/history.py` | ✅ | 对话历史 (重写为 HistoryStore 类) |
 | `data/sessions/default/characters.json` | ✅ | 示例角色卡 (3 调查员 + 2 NPC) |
-| `tests/test_session.py` | ✅ | 5 轮记忆集成测试 |
+| `tests/test_session.py` | ✅ | 5 轮集成测试 (记忆+检定路由) |
 
-## Phase 3 待办
+## Phase 3 完成
 
 | 文件 | 状态 | 说明 |
 |------|------|------|
-| `llm/roll_router.py` | 🔧 | 掷骰路由，德语 prompt→中文 prompt |
+| `llm/roll_router.py` | ✅ | 检定分类器 (中文化, constrained JSON) |
 
 ## 未处理 — DMbot 遗留文件
 

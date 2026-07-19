@@ -2,7 +2,7 @@
 
 本地 AI 主持人，跑《克苏鲁的呼唤》。你说，它听，然后以守秘人的身份回答——全部本地运行，零 API 成本。
 
-> **状态：Phase 1 完成** — 纯文字闭环跑通。gemma4:12b 实测三轮对话，输出合格的 KP 叙述。
+> **状态：Phase 2 完成** — 游戏状态、多轮记忆、Session 管理器就绪。5 轮实测验证记忆跨轮保持。
 
 ## 怎么跑
 
@@ -11,14 +11,13 @@ git clone https://github.com/Gousting/trpg-agent.git
 cd trpg-agent
 uv sync
 cp .env.example .env   # 编辑 OLLAMA_HOST 指向你的 Ollama
-uv run python tests/test_pipeline.py
+uv run python tests/test_session.py   # Phase 2 多轮记忆测试
 ```
 
 前提：Ollama 运行中，已 pull 模型（默认 gemma4:12b）。
 
 ```bash
-# 单元测试
-uv run pytest tests/test_unit.py -v
+uv run pytest tests/ -v   # 39 项单元测试
 ```
 
 ## 架构
@@ -29,28 +28,36 @@ uv run pytest tests/test_unit.py -v
 玩家输入 → [Ollama] → 中文 KP 回答 → sanitize 清洗 → 输出
                 ↑
          system prompt（KP 人格 + 世界状态 + 前情提要）
+                ↑
+         Session 管理器（角色卡 + 对话历史 + 上下文窗口）
 ```
 
-三层核心：
+**Phase 2 新增：**
 
-- **`prompts/kp_core_zh.md`** — 守秘人核心人格，52 行 2587 字。涵盖回应规则、恐怖氛围、NPC 处理、游戏规则
-- **`llm/sanitize.py`** — KP 回答清洗管道，12 项正则模式。去掉元话语、角色标签、AI 自指、过渡词
-- **`rules/coc.py`** — COC 7 版检定引擎，常规/困难/极难三级难度 + 大成功/大失败判定
+- **`session.py`** — Session 管理器。加载角色卡、管理对话历史、监控上下文窗口（超限触发 recap 压缩）、组装完整 system prompt
+- **`memory/game_state.py`** — COC 游戏状态。调查员（HP/SAN/Luck）、NPC（态度量表）、场景/任务、原子持久化
+- **`memory/history.py`** — 对话历史存储。JSONL 追加写入，支持查询/裁剪/清空
 
 ## 文件状态
 
 | 模块 | 状态 | 说明 |
 |------|------|------|
-| `llm/sanitize.py` | ✅ | 中文 KP 回答清洗 |
-| `prompts/kp_core_zh.md` | ✅ | 守秘人核心人格 |
+| `llm/sanitize.py` | ✅ | 中文 KP 回答清洗 (12 项正则) |
+| `prompts/kp_core_zh.md` | ✅ | 守秘人核心人格 (2587 字) |
 | `rules/coc.py` | ✅ | COC 检定引擎 |
 | `rules/engine.py` | ✅ | 通用掷骰引擎 |
-| `llm/client.py` | ✅ | Ollama 客户端 |
-| `llm/persona.py` | ✅ | Prompt 加载 |
-| `llm/prompt_assembly.py` | ✅ | Prompt 组装 |
+| `llm/client.py` | ✅ | Ollama 异步客户端 |
+| `session.py` | ✅ | Session 管理器 (Phase 2) |
+| `memory/game_state.py` | ✅ | COC 游戏状态 (Phase 2) |
+| `memory/history.py` | ✅ | 对话历史 (Phase 2) |
 | `tests/test_unit.py` | ✅ | 39 项单元测试 |
-| `tests/test_pipeline.py` | ✅ | 全链路集成测试 |
-| 其他 24 个文件 | 🔧 | 搬运自 DMbot，待中文化 |
+| `tests/test_session.py` | ✅ | 5 轮记忆集成测试 |
+| 其他 24 个文件 | 🔧 | 搬运自 DMbot，待后续 Phase 中文化 |
+
+## 迭代路线
+
+详见 [ROADMAP.md](ROADMAP.md)。
+Phase 1 纯文字闭环 ✅ · Phase 2 游戏状态与多轮记忆 ✅ · Phase 3 掷骰路由 → Phase 6 平板客户端。
 
 ## 许可
 

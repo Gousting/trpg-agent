@@ -11,27 +11,25 @@
 - Ollama 异步客户端（`llm/client.py`）
 - 39 项单元测试 + 全链路集成测试
 
-**验证标准：** 三轮对话无崩，KP 正确融入检定结果，氛围叙述达标。
+**验证标准：** 三轮对话无崩，KP 正确融入检定结果，氛围叙述达标。✓
 
 ---
 
-## Phase 2 — 游戏状态与多轮记忆
+## Phase 2 ✅ — 游戏状态与多轮记忆
 
 **目标：** 让 KP 记住之前发生的事，维护角色状态。
 
-**任务：**
+**已完成：**
+- `memory/game_state.py` — COC 游戏状态（Investigator/Npc/Quest/GameState），态度量表，原子持久化
+- `memory/history.py` — 重写为 HistoryStore 类，JSONL 格式，支持查询/裁剪/清空
+- `session.py` — Session 管理器，角色卡加载、对话历史管理、上下文窗口监控、完整 prompt 组装
+- `data/sessions/default/characters.json` — 示例角色卡（3 名调查员 + 2 NPC + 任务）
+- 空回答兜底处理
+- `tests/test_session.py` — 5 轮集成测试
 
-1. **中文化 `memory/state.py`** — WorldState 数据层，德语标签→中文标签。`DOWNED_CONDITION` → `"失去行动能力"`，`ATTITUDE_SCALE` 五级量表→中文。
+**验证标准：** 五轮对话不丢失关键信息，KP 能引用之前提到过的发现。✓
 
-2. **中文化 `memory/history.py`（已完成）** — 对话历史持久化，JSONL 格式。直接可用。
-
-3. **中文化 `prompt_assembly.py`（已完成）** — "前情提要"标题已改。
-
-4. **连接记忆到 pipeline** — 每轮对话自动追加 history，超出上下文窗口时触发 recap 压缩。
-
-5. **角色卡加载** — 从 JSON 文件加载调查员属性/技能，检定时自动查表。
-
-**验证标准：** 五轮以上对话不丢失关键信息，KP 能引用之前提到过的 NPC 和事件。
+**待优化：** 上下文超限时的 LLM recap 压缩（当前仅做窗口监控，未接入 LLM 生成摘要）。
 
 ---
 
@@ -63,6 +61,7 @@
 4. **孤注一掷** — 允许重试失败检定（后果更严重）
 5. **中文化 `memory/npc_memory.py`** — NPC 记忆，NPC 态度漂移
 6. **中文化 `memory/chekhov.py`** — Chekhov 清单（未收束伏线）
+7. **上下文超限 recap 压缩** — LLM 生成前情提要替代旧历史
 
 **验证标准：** 跑完一个完整的 COC 快速开始模组（如《古屋疑云》）。
 
@@ -96,15 +95,15 @@
 
 ## 中文化待办清单
 
-以下 15 个文件搬运自 DMbot，代码逻辑可用但德语文本需翻译：
+以下文件搬运自 DMbot，代码逻辑可用但德语文本需翻译：
 
 | 优先级 | 文件 | 当前状态 |
 |--------|------|----------|
 | P1 | `llm/consistency.py` | 一致性守卫，德语动词判断→中文方案 |
-| P1 | `memory/state.py` | WorldState 数据层 |
-| P1 | `memory/recap.py` | Recap 生成 |
-| P2 | `memory/npc_memory.py` | NPC 记忆 |
-| P2 | `memory/chekhov.py` | Chekhov 清单 |
+| P1 | `memory/state.py` | 已被 game_state.py 替代，可废弃 |
+| P1 | `memory/recap.py` | Recap 生成，待 Phase 4 |
+| P2 | `memory/npc_memory.py` | NPC 记忆，待 Phase 4 |
+| P2 | `memory/chekhov.py` | Chekhov 清单，待 Phase 4 |
 | P2 | `memory/gametime.py` | 游戏内时间 |
 | P2 | `llm/echo_guard.py` | 回声守卫 |
 | P2 | `llm/intro_guard.py` | 开场守卫 |

@@ -17,6 +17,16 @@ from .memory.game_state import GameState, Investigator, Npc, Quest
 from .memory.history import HistoryStore
 from .llm.persona import load_system_prompt
 from .llm.prompt_assembly import assemble_system_prompt
+from .llm.client import OllamaClient
+from .llm.roll_router import (
+    RollRequest,
+    classifier_schema,
+    classifier_prompt,
+    parse_router_response,
+    parse_markers,
+    clean_markers,
+)
+from .rules.coc import resolve_coc, describe_result
 
 log = logging.getLogger(__name__)
 
@@ -186,6 +196,70 @@ class Session:
 
         messages.append({"role": "user", "content": user_msg})
         return messages
+
+    # ── 检定路由（Phase 3）────────────────────────────
+
+    def _collect_skills(self) -> list[str]:
+        """收集所有调查员的技能列表（去重）。"""
+        skills: set[str] = set()
+        for inv in self.state.investigators:
+            skills.update(inv.skills.keys())
+        return sorted(skills)
+
+    def _get_skill_value(self, skill: str, character: str | None) -> int | None:
+        """查找指定角色（或任一拥有该技能的调查员）的技能值。"""
+        candidates = self.state.investigators
+        if character:
+            inv = self.state.find_investigator(character)
+            candidates = [inv] if inv else []
+        for inv in candidates:
+            if skill in inv.skills:
+                return inv.skills[skill]
+        return None
+
+    async def classify_and_resolve(
+        self, client: OllamaClient, player_input: str,
+    ) -> tuple[str, RollRequest | None]:
+        """分类玩家行动是否需要检定，如需则执行并返回上下文。
+
+        Returns:
+            (dice_context, roll_request) — dice_context 为空字符串表示无需检定。
+        """
+        # 先尝试 router（constrained JSON 分类器）
+        skills = self._collect_skills()
+        if skills:
+            try:
+                schema = classifier_schema(skills, ["常规", "困难", "极难"])
+                prompt = classifier_prompt(skills, ["常规", "困难", "极难"])
+                raw = await client.chat(
+                    prompt,
+                    [{"role": "user", "content": player_input}],
+                    format=schema,
+                )
+                import json as _json
+                data = _json.loads(raw)
+                request = parse_router_response(data)
+            except Exception as e:
+                log.debug("分类器调用失败: %s", e)
+                request = None
+        else:
+            request = None
+
+        if request is None:
+            return "", None
+
+        # 查找技能值
+        sv = self._get_skill_value(request.skill, request.character)
+        if sv is None:
+            log.info("技能 '%s' 不在任何调查员卡中，跳过检定", request.skill)
+            return "", None
+
+        # 执行检定
+        result = resolve_coc(sv, request.difficulty)
+        desc = describe_result(result, request.skill)
+        context = request.to_context(desc)
+        log.info("检定: %s", desc)
+        return context, request
 
     # ── 回合管理 ────────────────────────────────────
 

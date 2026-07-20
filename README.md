@@ -2,7 +2,7 @@
 
 本地 AI 主持人，跑《克苏鲁的呼唤》。你说，它听，然后以守秘人的身份回答——全部本地运行，零 API 成本。
 
-> **状态：Phase 4.5 完成** — 动态剧情事件、多人联机、SQLite 持久层、86 项测试全绿。
+> **状态：Phase 4.5 完成** — 动态剧情事件、RPG 风格存档（自动存档+NL触发+多人加载）、SQLite 持久层、97 项测试全绿。
 
 ## 怎么跑
 
@@ -17,7 +17,7 @@ uv run python tests/test_integration.py   # Phase 4 全链路测试 (6 轮)
 前提：Ollama 运行中，已 pull 模型（默认 gemma4:12b）。
 
 ```bash
-uv run pytest tests/ -v   # 86 项单元测试
+uv run pytest tests/ -v   # 97 项单元测试
 ```
 
 ## 架构
@@ -61,10 +61,11 @@ uv run pytest tests/ -v   # 86 项单元测试
 | `memory/gs_parser.py` | 动态剧情事件 — KP 回复中 `<!--GS-->` 标记块自动写入游戏状态 |
 | `memory/database.py` | SQLite 持久层 — 调查员跨 session 复用、声纹绑定、快照存档 |
 
-**多人联机**
+**多人联机 + RPG 存档**
 | 模块 | 说明 |
 |------|------|
-| `session.py` | speaker 参数支持多人说话、命名存档/读档/删档 |
+| `session.py` | speaker 参数支持多人说话、自动存档(每5轮)、NL保存/加载意图检测、多人加载摘要 |
+| `session.py` | `is_multiplayer` / `loaded_from` / `loaded_state_summary()` 辅助属性 |
 
 **测试**
 | 文件 | 说明 |
@@ -72,7 +73,7 @@ uv run pytest tests/ -v   # 86 项单元测试
 | `tests/test_unit.py` | 39 项单元测试 |
 | `tests/test_phase4.py` | 20 项规则测试 |
 | `tests/test_integration.py` | 6 轮全链路集成测试 |
-| `tests/test_multiplayer.py` | 7 项多人联机 + 存档测试 |
+| `tests/test_multiplayer.py` | 17 项多人联机 + RPG 存档测试 |
 | `tests/test_database.py` | 6 项数据库集成测试 |
 
 ## 迭代路线

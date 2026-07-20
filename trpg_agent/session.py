@@ -45,6 +45,10 @@ DEFAULT_MAX_CONTEXT = 4096         # Ollama num_ctx 默认值
 HISTORY_MAX_TURNS = 20             # 最多保留轮数
 RECAP_TRIGGER_RATIO = 0.75         # 超过 75% 上下文时触发 recap 压缩
 
+# 存档系统
+AUTO_SAVE_INTERVAL = 15            # 默认每 N 轮自动存档（约 1 小时）
+AUTO_SAVE_NAME = "auto_save"       # 自动存档槽名（覆盖）
+
 
 def _estimate_tokens(text: str) -> int:
     """粗略估算 token 数。中文约 1.5 字/token，英文约 4 字/token。"""
@@ -109,6 +113,7 @@ class Session:
         data_dir: Path | None = None,
         db = None,
         skip_characters: bool = False,  # load_game 等场景跳过角色加载
+        auto_save_interval: int = AUTO_SAVE_INTERVAL,  # 自动存档间隔（0=禁用）
     ):
         self.session_id = session_id
         self.max_context = max_context
@@ -117,6 +122,11 @@ class Session:
         self._history_path = self._dir / session_id / "history.jsonl"
         self._db = db
         self._adapter_cache: _HistoryListAdapter | None = None
+
+        # 存档追踪
+        self._turns_since_save: int = 0
+        self._save_loaded_from: str | None = None
+        self._auto_save_interval = auto_save_interval  # 0 表示禁用
 
         # 加载或创建状态
         if self._db is not None:
@@ -446,6 +456,13 @@ class Session:
                 "assistant", kp_answer,
             )
 
+        # 自动存档
+        if self._auto_save_interval > 0:
+            self._turns_since_save += 1
+            if self._turns_since_save >= self._auto_save_interval:
+                self.save_game(AUTO_SAVE_NAME)
+                self._turns_since_save = 0
+
         # 限制历史长度
         max_entries = HISTORY_MAX_TURNS * 2
         if self.history.count() > max_entries:
@@ -700,6 +717,7 @@ class Session:
             if self._history_path.is_file():
                 shutil.copy2(self._history_path, save_dir / "history.jsonl")
 
+        self._save_loaded_from = name
         log.info("存档: %s/%s (第 %d 轮)", self.session_id, name, self.state.turn_count)
         return save_dir
 
@@ -734,6 +752,7 @@ class Session:
                          skip_characters=True)
             session.state = state
             session._history_list = history_list
+            session._save_loaded_from = save_name
             log.info("读档: %s/%s (第 %d 轮)", session_id, save_name, state.turn_count)
             return session
 
@@ -757,6 +776,7 @@ class Session:
             shutil.copy2(history_path, session._history_path)
             session._history_store = HistoryStore(session._history_path)
 
+        session._save_loaded_from = save_name
         log.info("读档: %s/%s (第 %d 轮, %d 条历史)",
                  session_id, save_name, session.state.turn_count, session.history.count())
         return session
@@ -773,6 +793,85 @@ class Session:
             log.info("删除存档: %s/%s", session_id, name)
             return True
         return False
+
+    # ── NL 存档/读档意图检测 ─────────────────────────
+
+    # 保存关键词
+    _SAVE_KEYWORDS: list[str] = [
+        "保存", "存档", "存个档", "储存", "记录进度",
+        "保存进度", "储存进度", "存一下", "存挡", "备份进度",
+        "记录当前", "保存当前", "存入", "备份",
+    ]
+
+    # 加载关键词
+    _LOAD_KEYWORDS: list[str] = [
+        "加载", "读档", "继续游戏", "读取进度", "读取存档",
+        "载入进度", "接上次", "继续上次", "继续冒险",
+    ]
+
+    @staticmethod
+    def detect_save_intent(text: str) -> str | None:
+        """检测是否为保存指令，返回存档名或 None。
+
+        支持两种形式：
+        - "保存为 boss 战前" → 返回 "boss战前"
+        - "保存当前进度" / "存个档" → 返回时间戳名称
+        """
+        import re
+        text_stripped = text.strip()
+
+        # "保存为 XXX" / "存档为 XXX" → 自定义名称
+        m = re.search(r'(?:保存为|存档为|存为|储存为)\s*(.+?)(?:\s*$)', text_stripped)
+        if m:
+            name = re.sub(r'\s+', '', m.group(1))[:20]
+            return name if name else None
+
+        # 通用关键词匹配
+        for kw in Session._SAVE_KEYWORDS:
+            if kw in text_stripped:
+                from datetime import datetime
+                return f"手动_{datetime.now().strftime('%m%d_%H%M')}"
+
+        return None
+
+    @staticmethod
+    def detect_load_intent(text: str) -> bool:
+        """检测是否为加载指令。"""
+        text_stripped = text.strip()
+        for kw in Session._LOAD_KEYWORDS:
+            if kw in text_stripped:
+                return True
+        return False
+
+    # ── 多人加载辅助 ─────────────────────────────────
+
+    @property
+    def is_multiplayer(self) -> bool:
+        """判断当前 session 是否为多人模式（>1 个调查员）。"""
+        return len(self.state.investigators) > 1
+
+    @property
+    def loaded_from(self) -> str | None:
+        """返回当前 session 是从哪个存档加载的（或上次保存到哪个存档）。"""
+        return self._save_loaded_from
+
+    def loaded_state_summary(self) -> str:
+        """加载后的人性化摘要——一眼看到有哪些人、在哪里、第几轮。"""
+        inv_names = [i.name for i in self.state.investigators]
+        inv_details = []
+        for i in self.state.investigators:
+            inv_details.append(
+                f"  {i.name} HP:{i.hp}/{i.max_hp} SAN:{i.san}/{i.max_san} LUCK:{i.luck}"
+            )
+        mode = "多人" if self.is_multiplayer else "单人"
+        lines = [
+            f"📂 存档: {self.loaded_from or '(新游戏)'}",
+            f"🎭 模式: {mode} ({len(inv_names)} 位调查员)",
+            f"📍 地点: {self.state.location or '未设定'}",
+            f"🔄 回合: 第 {self.state.turn_count} 轮",
+            f"👤 调查员:",
+        ] + inv_details
+        return "\n".join(lines)
 
     # ── 便捷方法 ────────────────────────────────────
 

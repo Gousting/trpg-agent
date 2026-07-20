@@ -52,6 +52,7 @@
 | `prompts/npc_memory_extract_zh.md` | ✅ | NPC 记忆提取 prompt（中文版） |
 | `tests/test_phase4.py` | ✅ | 20 项规则测试 |
 | `tests/test_integration.py` | ✅ | 6 轮全链路集成测试 |
+| `memory/gs_parser.py` | ✅ | GS 标记解析 — KP 回复中 `<!--GS-->` 块自动写入 GameState (11 种指令) |
 
 ## 未处理 — DMbot 遗留文件
 

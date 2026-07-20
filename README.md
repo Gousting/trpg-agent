@@ -17,7 +17,7 @@ uv run python tests/test_integration.py   # Phase 4 全链路测试 (6 轮)
 前提：Ollama 运行中，已 pull 模型（默认 gemma4:12b）。
 
 ```bash
-uv run pytest tests/ -v   # 59 项单元测试
+uv run pytest tests/ -v   # 73 项单元测试
 ```
 
 ## 架构
@@ -58,6 +58,7 @@ uv run pytest tests/ -v   # 59 项单元测试
 | `rules/combat.py` | 格斗/射击/闪避/反击 |
 | `rules/luck.py` | 幸运值消耗与恢复 |
 | `rules/pushing.py` | 孤注一掷重试 |
+| `memory/gs_parser.py` | 动态剧情事件 — KP 回复中 `<!--GS-->` 标记块自动写入游戏状态 |
 
 **测试**
 | 文件 | 说明 |

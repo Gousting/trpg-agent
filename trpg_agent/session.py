@@ -27,6 +27,10 @@ from .llm.roll_router import (
     clean_markers,
 )
 from .rules.coc import resolve_coc, describe_result
+from .rules.sanity import san_check, SanLoss, SanCheckResult
+from .rules.combat import resolve_attack, ActionType
+from .rules.luck import spend_luck
+from .rules.pushing import push_roll, can_push
 
 log = logging.getLogger(__name__)
 
@@ -168,6 +172,38 @@ class Session:
             return f"前情提要：{self.state.recap}\n\n最近对话：\n{self.history.as_text(last=10)}"
         return f"对话记录：\n{self.history.as_text(last=15)}"
 
+    async def maybe_compress(self, client: OllamaClient) -> bool:
+        """当上下文接近上限时，用 LLM 生成前情提要替代旧历史。
+
+        Returns:
+            True 如果执行了压缩
+        """
+        if not self._should_compress():
+            return False
+
+        log.info("上下文超限（%d tokens），触发 recap 压缩",
+                 self._system_token_budget() + self._history_token_usage())
+
+        # 构建压缩提示
+        recap_prompt = (
+            "你是桌面角色扮演游戏的主持人，正在写一份简短的前情提要。\n"
+            "根据以下对话记录，总结已发生的关键事件：去了哪里、遇到谁、做了什么决定、发现了什么线索。\n"
+            "写 3-6 句话，紧凑散文，用中文。不要编造，只总结。以未解决线索结尾。\n\n"
+            f"对话记录：\n{self.history.as_text()}"
+        )
+
+        try:
+            raw = await client.chat(
+                recap_prompt,
+                [{"role": "user", "content": "请总结以上对话。"}],
+            )
+            self.set_recap(raw)
+            log.info("Recap 压缩完成 (%d 字)", len(self.state.recap))
+            return True
+        except Exception:
+            log.exception("Recap 压缩失败")
+            return False
+
     def set_recap(self, text: str) -> None:
         """设置前情提要。"""
         self.state.recap = text.strip()
@@ -182,7 +218,27 @@ class Session:
             persona=self._persona,
             recap=self.state.recap if self.state.recap else None,
             state_summary=self.state.scene_summary(),
+            npc_memory=self._build_npc_memory_block(),
         )
+
+    def _build_npc_memory_block(self) -> str | None:
+        """生成当前场景的 NPC 记忆/态度提示块。
+
+        包含在场 NPC 的态度、描述和关键信息。
+        """
+        present = [n for n in self.state.npcs if n.location == self.state.location]
+        if not present:
+            return None
+
+        from .memory.game_state import ATTITUDE_LABELS
+        lines = ["## 在场 NPC（角色扮演参考）"]
+        for npc in present:
+            att = ATTITUDE_LABELS.get(npc.attitude, npc.attitude)
+            line = f"- {npc.name}（{att}）"
+            if npc.description:
+                line += f"：{npc.description}"
+            lines.append(line)
+        return "\n".join(lines)
 
     def build_messages(self, player_input: str, *, dice_context: str = "") -> list[dict[str, str]]:
         """构建发给 Ollama 的消息列表。
@@ -292,6 +348,135 @@ class Session:
         self.state.save(self._state_path)
         # history 在 append 时已自动写入
         log.debug("状态已保存 (第 %d 轮)", self.state.turn_count)
+
+    # ── Phase 4: SAN / 战斗 / 幸运 / 孤注一掷 ──────────────
+
+    def perform_san_check(
+        self, investigator_name: str, loss_level: str,
+    ) -> SanCheckResult | None:
+        """对指定调查员执行 SAN 检定。
+
+        Args:
+            investigator_name: 调查员名字
+            loss_level: SAN 损失等级名（如 "MAJOR", "SEVERE"）
+
+        Returns:
+            SanCheckResult，找不到调查员返回 None
+        """
+        inv = self.state.find_investigator(investigator_name)
+        if inv is None:
+            log.warning("SAN 检定：找不到调查员 '%s'", investigator_name)
+            return None
+
+        try:
+            level = SanLoss[loss_level.upper()]
+        except KeyError:
+            log.warning("未知 SAN 损失等级: %s", loss_level)
+            return None
+
+        result = san_check(inv.san, level)
+        inv.san = result.san_after
+
+        if result.went_insane:
+            condition = f"疯狂: {result.symptom}"
+            if condition not in inv.conditions:
+                inv.conditions.append(condition)
+
+        log.info("SAN 检定 %s: %s", investigator_name, result.description)
+        return result
+
+    def perform_attack(
+        self, attacker_name: str, defender_name: str,
+        attack_type: str, attack_skill: int,
+        *, defense_type: str | None = None, defense_skill: int | None = None,
+        damage_dice: str = "1d3", damage_bonus: int = 0,
+    ) -> AttackResult | None:
+        """执行一次攻击结算。
+
+        Args:
+            attacker_name: 攻击方名字
+            defender_name: 防守方名字
+            attack_type: 攻击类型 "FIGHTING" | "FIREARMS"
+            attack_skill: 攻击技能值
+            defense_type: 防守类型 "DODGE" | "FIGHTING_BACK" | None
+            defense_skill: 防守技能值
+            damage_dice: 伤害骰
+            damage_bonus: 伤害加值
+
+        Returns:
+            AttackResult，如造成伤害则自动应用到防守方 HP
+        """
+        atk_type = ActionType[attack_type.upper()]
+        def_type = ActionType[defense_type.upper()] if defense_type else None
+
+        result = resolve_attack(
+            attacker_name, defender_name, atk_type, attack_skill,
+            defense_type=def_type, defense_skill=defense_skill or 0,
+            damage_dice=damage_dice, damage_bonus=damage_bonus,
+        )
+
+        # 自动应用伤害
+        if result.total_damage > 0 and result.attack_success:
+            defender = self.state.find_investigator(defender_name)
+            if defender is None:
+                defender_npc = self.state.find_npc(defender_name)
+                if defender_npc is None:
+                    log.warning("战斗：找不到防守方 '%s'", defender_name)
+                # NPC 伤害暂不追踪（简化）
+            else:
+                defender.take_damage(result.total_damage)
+                log.info("战斗：%s 受到 %d 点伤害（HP %d/%d）",
+                         defender_name, result.total_damage, defender.hp, defender.max_hp)
+
+        return result
+
+    def spend_luck_for_roll(
+        self, investigator_name: str,
+        roll_value: int, target_value: int,
+    ) -> str | None:
+        """消耗调查员的幸运值来调整检定。
+
+        Returns:
+            KP 叙述文本，找不到调查员返回 None
+        """
+        inv = self.state.find_investigator(investigator_name)
+        if inv is None:
+            return None
+
+        result = spend_luck(inv.luck, roll_value, target_value)
+        inv.luck = result.luck_after
+        return result.description
+
+    def try_push_roll(
+        self, skill_value: int, difficulty: str = "常规",
+        *, previous_roll: int = 0,
+    ) -> dict | None:
+        """尝试孤注一掷。
+
+        Returns:
+            {success, roll, level, description} 或 None（当前无前次检定结果则跳过）
+        """
+        if previous_roll <= 0:
+            return None
+
+        from .rules.coc import resolve_coc, CocTestResult, SuccessLevel
+        # 构造上次结果
+        prev = CocTestResult(
+            roll=previous_roll, skill_value=skill_value, difficulty=difficulty,
+            target=skill_value, success=False, level=SuccessLevel.FAILURE,
+            is_critical=False, is_fumble=False,
+        )
+        if not can_push(prev):
+            return {"success": False, "roll": previous_roll, "level": "无法孤注一掷",
+                    "description": "大失败或已成功，不能孤注一掷。"}
+
+        pushed = push_roll(skill_value, difficulty, previous_result=prev)
+        return {
+            "success": pushed.pushed.success,
+            "roll": pushed.pushed.roll,
+            "level": pushed.pushed.level.value,
+            "description": pushed.description,
+        }
 
     # ── 便捷方法 ────────────────────────────────────
 

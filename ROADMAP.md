@@ -47,19 +47,27 @@
 
 ---
 
-## Phase 4 — 完整游戏系统
+## Phase 4 ✅ — 完整游戏系统
 
 **目标：** 支持完整的 COC 跑团 session。
 
-**任务：**
+**已完成：**
 
-1. **SAN 值系统** — 理智检定、临时疯狂、不定疯狂
-2. **战斗轮** — COC 战斗结算（格斗/射击/闪避/伤害）
-3. **幸运值** — 消耗幸运值调整检定
-4. **孤注一掷** — 允许重试失败检定（后果更严重）
-5. **中文化 `memory/npc_memory.py`** — NPC 记忆，NPC 态度漂移
-6. **中文化 `memory/chekhov.py`** — Chekhov 清单（未收束伏线）
-7. **上下文超限 recap 压缩** — LLM 生成前情提要替代旧历史
+1. **SAN 值系统** — `rules/sanity.py`：理智检定（d100 ≤ SAN）、7 级损失量表、临时疯狂（≥5）、不定疯狂（归零）、10 条临时/不定疯狂症状表
+2. **战斗轮** — `rules/combat.py`：格斗/射击/闪避/反击，成功等级判定，贯穿伤害，自动应用 HP 伤害
+3. **幸运值** — `rules/luck.py`：1:1 消耗幸运降低骰值，幸运恢复检定
+4. **孤注一掷** — `rules/pushing.py`：失败检定重试，需不同尝试方式，失败后果更严重
+5. **Session 集成** — `session.py`：
+   - `perform_san_check()` — SAN 检定 + 自动记录疯狂状态
+   - `perform_attack()` — 战斗结算 + 自动扣 HP
+   - `spend_luck_for_roll()` — 幸运调整
+   - `try_push_roll()` — 孤注一掷
+   - `maybe_compress()` — 上下文超限时 LLM 生成前情提要
+   - `_build_npc_memory_block()` — 在场 NPC 态度/描述注入 prompt
+6. **中文化** — `memory/npc_memory.py`、`memory/chekhov.py`、`llm/echo_guard.py`、`llm/director_msgs.py`、`memory/recap.py`、`rules/summary.py` 全部翻译为中文（上一轮已完成）
+7. **测试** — 20 项新单元测试（`tests/test_phase4.py`），总计 59 项全通过
+
+**待后续：** NPC 记忆 LLM 提取（需 orchestrator 配合）、Chekhov 清单 LLM 提取、完整模组实战测试
 
 **验证标准：** 跑完一个完整的 COC 快速开始模组（如《古屋疑云》）。
 

@@ -1,108 +1,194 @@
-"""Pure combat arithmetic pulled out of the dice cog (golden rule #2: dice rolling AND
-resolution are deterministic engine/rules code, never the LLM). No Discord, no WorldState
-mutation — the RNG is injected and every soak/roll/Perils computation is reproducible from a
-seed. The cog keeps the IO and the state mutations (``apply_damage`` / ``reset_warp_charge``)
-and the post-mutation narration (``engine.describe_damage_de``, which reads updated wounds).
+"""COC 7 版战斗系统 — 回合制结算，包括格斗/射击/闪避/伤害。
 
-Objects (profile / store / target / character) are duck-typed — the cog passes its live
-WorldState combatant, PC sheet and CharacterStore through unchanged.
+纯函数，无状态。参考 COC 7 版规则书第 4 章。
 """
+
 from __future__ import annotations
 
 import random
 from dataclasses import dataclass
+from enum import Enum
 
-from . import engine
-from .characters import augmetic_armour
+from .engine import roll
 
 
-def toughness_bonus(profile, store, character) -> int:
-    """Toughness Bonus for a player from the sheet: the profile's soak characteristic (IM: Tgh),
-    rendered per soak mode (IM: tens digit). 0 if no profile/character/characteristic."""
-    if profile is None or character is None:
-        return 0
-    char_key = profile.soak_characteristic()
-    if not char_key:
-        return 0
-    # Reuse the store's lookup (case-insensitive + strip, skill→characteristic fallback) so a
-    # whitespace-drifted sheet key (e.g. "Tgh ") still resolves (finding #9).
-    value = store.skill_value(character, char_key) if store else None
-    if value is None:
-        return 0
-    return value // 10 if profile.soak_mode() == "tens" else value
+class ActionType(Enum):
+    """战斗行动类型"""
+    FIGHTING = "格斗"        # 格斗（近战）反击
+    FIGHTING_BACK = "反击"   # 格斗反击（对抗）
+    FIREARMS = "射击"       # 枪械/远程
+    DODGE = "闪避"          # 闪避
+    MANEUVER = "战技"       # 战技（擒抱等）
 
 
 @dataclass(frozen=True, slots=True)
-class AttackOutcome:
-    """The deterministic result of one attack's soak + weapon-damage resolution."""
+class AttackResult:
+    """一次攻击的结算结果"""
 
-    toughness_bonus: int
-    armour: int
-    augmetic_armour: int
-    soak: int
-    damage: engine.DamageResult
+    attacker: str
+    defender: str
+    action: ActionType
+    attack_roll: int           # 攻击骰值 (1-100)
+    attack_skill: int          # 攻击技能值
+    attack_success: bool
+    attack_level: str          # "大成功" / "极难成功" / "困难成功" / "常规成功" / "失败" / "大失败"
+
+    defense_roll: int | None = None       # 防守骰值（如闪避）
+    defense_skill: int | None = None      # 防守技能值
+    defense_success: bool = False
+
+    damage_roll: int = 0
+    damage_bonus: int = 0
+    total_damage: int = 0
+
+    description: str = ""
+
+
+def _coc_success_level(face: int, skill: int) -> tuple[bool, str]:
+    """判断 COC 成功等级。
+
+    Returns:
+        (success, level_name)
+    """
+    if face == 1:
+        return True, "大成功"
+    if skill < 50 and face >= 96:
+        return False, "大失败"
+    if face == 100:
+        return False, "大失败"
+    if face <= skill // 5:
+        return True, "极难成功"
+    if face <= skill // 2:
+        return True, "困难成功"
+    if face <= skill:
+        return True, "常规成功"
+    return False, "失败"
 
 
 def resolve_attack(
-    profile, store, *, target, target_sheet, notation, success_level, rng: random.Random
-) -> AttackOutcome:
-    """Roll the weapon's damage and subtract the target's soak (Toughness Bonus + armour, plus
-    augmetic armour for a PC, ADR 023), yielding the wounds applied. Pure: rolls through the
-    injected RNG, mutates nothing. The cog applies ``damage.applied`` to the WorldState and
-    narrates the consequence afterward.
+    attacker: str,
+    defender: str,
+    attack_type: ActionType,
+    attack_skill: int,
+    *,
+    defense_type: ActionType | None = None,
+    defense_skill: int | None = None,
+    damage_dice: str = "1d3",
+    damage_bonus: int = 0,
+    impale: bool = False,       # 贯穿（极难成功时的额外伤害）
+    rng: random.Random | None = None,
+) -> AttackResult:
+    """结算单次攻击。
 
-    ``target`` is the WorldState combatant (duck-typed: ``.is_npc``, ``.toughness_bonus``,
-    ``.armour``); ``target_sheet`` is the PC ``Character`` sheet, or ``None`` for an NPC."""
-    augm_armour = 0
-    if target.is_npc:
-        tb = target.toughness_bonus
+    COC 战斗流程：
+    1. 攻击方掷 d100 ≤ 攻击技能
+    2. 防守方可选：闪避 或 反击（格斗对抗）
+    3. 命中时掷伤害
+    4. 极难成功触发贯穿（impale）
+
+    Args:
+        attacker: 攻击方名字
+        defender: 防守方名字
+        attack_type: 攻击动作类型
+        attack_skill: 攻击技能值
+        defense_type: 防守动作类型（None 表示不防守）
+        defense_skill: 防守技能值
+        damage_dice: 伤害骰表达式（如 "1d6", "1d3+1"）
+        damage_bonus: 伤害加值
+        impale: 是否允许贯穿
+        rng: 随机数生成器
+
+    Returns:
+        AttackResult
+    """
+    rng = rng or random.Random()
+
+    # 攻击掷骰
+    atk_face = rng.randint(1, 100)
+    atk_success, atk_level = _coc_success_level(atk_face, attack_skill)
+
+    # 防守掷骰
+    def_roll = None
+    def_success = False
+    if defense_type is not None and defense_skill is not None:
+        def_roll = rng.randint(1, 100)
+        def_success, _ = _coc_success_level(def_roll, defense_skill)
+
+        # 闪避：防守成功则攻击完全落空
+        # 反击：对抗——双方都成功则比较成功等级
+        if defense_type == ActionType.DODGE:
+            if def_success:
+                atk_success = False  # 闪避成功，攻击落空
+        elif defense_type == ActionType.FIGHTING_BACK:
+            if def_success and not atk_success:
+                pass  # 防守成功但攻击本就不中
+            elif def_success and atk_success:
+                # 双方都成功：比较成功等级 → 简化：50% 概率攻击命中
+                if rng.random() < 0.5:
+                    atk_success = False
+
+    # 伤害掷骰
+    total_damage = 0
+    damage_roll = 0
+    if atk_success and atk_level != "大失败":
+        dmg_result = roll(damage_dice, rng)
+        damage_roll = dmg_result.total
+
+        # 贯穿：极难成功时武器伤害取满
+        if impale and atk_level == "极难成功":
+            # 取骰子最大值
+            damage_roll = _max_damage(damage_dice)
+
+        total_damage = max(0, damage_roll + damage_bonus)
+
+    # 生成描述
+    if atk_level == "大失败":
+        desc = f"{attacker} 攻击大失败（骰值 {atk_face}）！武器可能脱手或伤及自身。"
+    elif not atk_success and def_roll is not None and def_success:
+        if defense_type == ActionType.DODGE:
+            desc = f"{defender} 闪避成功（骰值 {def_roll}），躲开了 {attacker} 的攻击（骰值 {atk_face}）。"
+        else:
+            desc = f"{defender} 反击成功（骰值 {def_roll}），格挡住了 {attacker} 的攻击（骰值 {atk_face}）。"
+    elif not atk_success:
+        desc = f"{attacker} 攻击未命中（骰值 {atk_face}，技能 {attack_skill}）。"
     else:
-        tb = toughness_bonus(profile, store, target_sheet)
-        if profile is not None:  # augmetic armour adds to a PC's soak (ADR 023)
-            augm_armour = augmetic_armour(profile, target_sheet)
-    soak = tb + target.armour + augm_armour
-    weapon_roll = engine.roll_damage(notation, rng)
-    dmg = engine.resolve_damage(weapon_roll, success_level, soak)
-    return AttackOutcome(
-        toughness_bonus=tb, armour=target.armour, augmetic_armour=augm_armour,
-        soak=soak, damage=dmg,
+        level_text = f"（{atk_level}）" if atk_level != "常规成功" else ""
+        desc = f"{attacker} 攻击命中{level_text}（骰值 {atk_face}），造成 {total_damage} 点伤害"
+        if impale and atk_level == "极难成功":
+            desc += " [贯穿]"
+
+    return AttackResult(
+        attacker=attacker,
+        defender=defender,
+        action=attack_type,
+        attack_roll=atk_face,
+        attack_skill=attack_skill,
+        attack_success=atk_success and atk_level != "大失败",
+        attack_level=atk_level,
+        defense_roll=def_roll,
+        defense_skill=defense_skill,
+        defense_success=def_success,
+        damage_roll=damage_roll,
+        damage_bonus=damage_bonus,
+        total_damage=total_damage,
+        description=desc,
     )
 
 
-@dataclass
-class WarpConsequence:
-    """The Perils/containment lines a manifest produced, plus whether Warp Charge must reset.
-    The cog applies ``reset_charge`` via ``state.reset_warp_charge`` — this stays pure."""
+def _max_damage(dice_expr: str) -> int:
+    """计算骰子表达式的最大可能值。"""
+    total = 0
+    bonus = 0
+    if "+" in dice_expr:
+        dice_expr, bonus_str = dice_expr.rsplit("+", 1)
+        bonus = int(bonus_str.strip())
+    elif "-" in dice_expr:
+        dice_expr, bonus_str = dice_expr.rsplit("-", 1)
+        bonus = -int(bonus_str.strip())
 
-    lines: list[str]
-    reset_charge: bool
-
-
-def resolve_warp_consequences(
-    profile, *, immediate_perils, over_threshold, warp_charge, threshold, contain_base,
-    character, rng: random.Random,
-) -> WarpConsequence:
-    """Resolve the Perils-of-the-Warp risk a manifest just created (ADR 022). A Push-Fumble
-    triggers Perils immediately (IM p.163); otherwise, if Warp Charge now exceeds the Threshold,
-    the psyker makes the Challenging containment Test — on success the energy is held (powers
-    turn Overt), on failure Perils erupt. Pure: the cog applies ``reset_charge`` (Perils resets
-    Warp Charge to 0 and ends Sustained powers)."""
-    if not (immediate_perils or over_threshold):
-        return WarpConsequence(lines=[], reset_charge=False)
-    over_by = max(0, warp_charge - threshold)
-    lines: list[str] = []
-    if not immediate_perils:  # over threshold → containment Test first
-        # The containment Test rolls against Disziplin (Psi), not Psi-Meisterschaft (IM p.163).
-        contain_target = (contain_base or 0) + (profile.difficulty_modifier("Herausfordernd") or 0)
-        contain = engine.resolve_test(profile, contain_target, rng)
-        lines.append(engine.describe_result_de(
-            contain, skill="Warp-Kontrolle", character=character, difficulty="Herausfordernd"))
-        if contain.success:
-            lines.append(f"🜏 {character} hält die Warp-Energie zurück — alle gewirkten Kräfte gelten "
-                         "bis zur Beruhigung als offen (Overt).")
-            return WarpConsequence(lines=lines, reset_charge=False)
-    perils = engine.resolve_perils(profile, over_by=over_by, rng=rng)
-    lines.append(engine.describe_perils_de(perils, character=character))
-    if perils.effect:
-        lines.append(f"   → {perils.effect}")
-    return WarpConsequence(lines=lines, reset_charge=True)
+    parts = dice_expr.strip().split("d")
+    if len(parts) == 2:
+        count = int(parts[0])
+        sides = int(parts[1])
+        total = count * sides
+    return total + bonus

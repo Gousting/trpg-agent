@@ -217,12 +217,20 @@ class GameState:
         for inv in self.investigators:
             if inv.name == key:
                 return inv
+        # 模糊匹配：检查搜索名是否为角色名的子串，或反之
+        for inv in self.investigators:
+            if key in inv.name or inv.name in key:
+                return inv
         return None
 
     def find_npc(self, name: str) -> Npc | None:
         key = name.strip()
         for npc in self.npcs:
             if npc.name == key:
+                return npc
+        # 模糊匹配
+        for npc in self.npcs:
+            if key in npc.name or npc.name in key:
                 return npc
         return None
 

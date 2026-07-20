@@ -78,6 +78,9 @@ class Session:
         # 加载 KP 人格
         self._persona = load_system_prompt()
 
+        # 自动加载角色卡
+        self.load_characters()
+
     # ── 角色管理 ────────────────────────────────────
 
     def load_characters(self, characters_path: Path | None = None) -> None:
@@ -225,8 +228,14 @@ class Session:
         Returns:
             (dice_context, roll_request) — dice_context 为空字符串表示无需检定。
         """
+        import json as _json
+
         # 先尝试 router（constrained JSON 分类器）
         skills = self._collect_skills()
+        if not skills:
+            log.warning("角色卡中没有技能，检定路由跳过")
+            return "", None
+
         if skills:
             try:
                 schema = classifier_schema(skills, ["常规", "困难", "极难"])
@@ -235,15 +244,16 @@ class Session:
                     prompt,
                     [{"role": "user", "content": player_input}],
                     format=schema,
+                    options={"temperature": 0.2},
                 )
-                import json as _json
                 data = _json.loads(raw)
                 request = parse_router_response(data)
-            except Exception as e:
-                log.debug("分类器调用失败: %s", e)
+            except _json.JSONDecodeError as e:
+                log.info("分类器 JSON 解析失败（模型输出格式错误）: %s", e)
                 request = None
-        else:
-            request = None
+            except Exception:
+                log.exception("分类器调用异常")
+                request = None
 
         if request is None:
             return "", None

@@ -53,6 +53,51 @@ def _estimate_tokens(text: str) -> int:
     return int(chinese_chars / 1.5 + other_chars / 4)
 
 
+# ── 历史列表适配器（db 模式兼容 HistoryStore API）───
+
+class _HistoryListAdapter:
+    """将 list[dict] 适配为 HistoryStore 兼容接口。"""
+
+    def __init__(self, entries: list[dict[str, str]]):
+        self._entries = entries
+
+    def append(self, role: str, content: str, *, speaker: str | None = None) -> None:
+        entry: dict = {"role": role, "content": content}
+        if speaker:
+            entry["speaker"] = speaker
+        self._entries.append(entry)
+
+    def entries(self) -> list[dict[str, str]]:
+        return list(self._entries)
+
+    def as_messages(self) -> list[dict[str, str]]:
+        return [{"role": e["role"], "content": e["content"]} for e in self._entries]
+
+    def as_text(self, last: int = 0) -> str:
+        entries = self._entries[-last:] if last > 0 else self._entries
+        lines = []
+        for e in entries:
+            prefix = "玩家" if e["role"] == "user" else "KP"
+            lines.append(f"{prefix}: {e['content']}")
+        return "\n".join(lines)
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+    def count(self) -> int:
+        return len(self._entries)
+
+    def trim(self, keep_last: int) -> None:
+        if len(self._entries) > keep_last:
+            del self._entries[:-keep_last]
+
+    def last_user_message(self) -> str | None:
+        for e in reversed(self._entries):
+            if e["role"] == "user":
+                return e["content"]
+        return None
+
+
 class Session:
     """管理一局 COC 跑团的完整会话状态。"""
 
@@ -62,15 +107,21 @@ class Session:
         *,
         max_context: int = DEFAULT_MAX_CONTEXT,
         data_dir: Path | None = None,
+        db = None,  # Database | None — SQLite 后端（可选）
     ):
         self.session_id = session_id
         self.max_context = max_context
         self._dir = data_dir or SESSIONS_DIR
         self._state_path = self._dir / session_id / "state.json"
         self._history_path = self._dir / session_id / "history.jsonl"
+        self._db = db  # None → JSON 兼容模式
 
         # 加载或创建状态
-        self.state = GameState.load(self._state_path)
+        if self._db is not None:
+            self.state = self._db.load_session_state(session_id)
+        else:
+            self.state = GameState.load(self._state_path)
+
         if self.state is None:
             self.state = GameState(session_id=session_id)
             log.info("新建 session: %s", session_id)
@@ -78,13 +129,25 @@ class Session:
             log.info("加载 session: %s (第 %d 轮)", session_id, self.state.turn_count)
 
         # 加载对话历史
-        self.history = HistoryStore(self._history_path)
+        if self._db is not None:
+            self._history_list: list[dict[str, str]] = self._db.load_history(session_id)
+        else:
+            self._history_store = HistoryStore(self._history_path)
 
         # 加载 KP 人格
         self._persona = load_system_prompt()
 
         # 自动加载角色卡
         self.load_characters()
+
+    # ── 历史访问统一接口 ──────────────────────────
+
+    @property
+    def history(self):
+        """兼容旧代码：db 模式返回列表适配器，JSON 模式返回 HistoryStore。"""
+        if self._db is not None:
+            return _HistoryListAdapter(self._history_list)
+        return self._history_store
 
     # ── 角色管理 ────────────────────────────────────
 
@@ -359,6 +422,18 @@ class Session:
         self.history.append("assistant", kp_answer)
         self.state.turn_count += 1
 
+        # 数据库模式：同步写入
+        if self._db is not None:
+            self._db.save_session_state(self.state)
+            self._db.append_history(
+                self.session_id, self.state.turn_count,
+                "user", player_input, speaker,
+            )
+            self._db.append_history(
+                self.session_id, self.state.turn_count,
+                "assistant", kp_answer,
+            )
+
         # 限制历史长度
         if self.history.count() > HISTORY_MAX_TURNS * 2:
             self.history.trim(keep_last=HISTORY_MAX_TURNS * 2)
@@ -366,8 +441,12 @@ class Session:
 
     def persist(self) -> None:
         """持久化状态和历史。"""
-        self.state.save(self._state_path)
-        # history 在 append 时已自动写入
+        if self._db is not None:
+            self._db.save_session_state(self.state)
+            self._db.save_session_npcs(self.session_id, self.state.npcs)
+            self._db.save_session_quests(self.session_id, self.state.quests)
+        else:
+            self.state.save(self._state_path)
         log.debug("状态已保存 (第 %d 轮)", self.state.turn_count)
 
     # ── 模组系统 ─────────────────────────────────────
@@ -588,17 +667,26 @@ class Session:
         save_dir = DATA_DIR / "saves" / self.session_id / name
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        # 保存状态
-        self.state.save(save_dir / "state.json")
-        # 复制对话历史
-        if self._history_path.is_file():
-            shutil.copy2(self._history_path, save_dir / "history.jsonl")
+        if self._db is not None:
+            # db 模式：创建快照
+            self._db.save_session_state(self.state)
+            self._db.save_session_npcs(self.session_id, self.state.npcs)
+            self._db.save_session_quests(self.session_id, self.state.quests)
+            self._db.save_snapshot(self.session_id, name)
+        else:
+            # JSON 模式
+            self.state.save(save_dir / "state.json")
+            if self._history_path.is_file():
+                shutil.copy2(self._history_path, save_dir / "history.jsonl")
+
         log.info("存档: %s/%s (第 %d 轮)", self.session_id, name, self.state.turn_count)
         return save_dir
 
-    @classmethod
-    def list_saves(cls, session_id: str = "default") -> list[str]:
-        """列出某个 session 的所有存档名。"""
+    @staticmethod
+    def list_saves(session_id: str = "default", *, db=None) -> list[str]:
+        """列出某个 session 的所有存档名。db 模式优先查数据库快照。"""
+        if db is not None:
+            return db.list_saves(session_id)
         save_root = DATA_DIR / "saves" / session_id
         if not save_root.is_dir():
             return []
@@ -609,40 +697,53 @@ class Session:
 
     @classmethod
     def load_game(cls, session_id: str, save_name: str,
-                  *, data_dir: Path | None = None) -> "Session | None":
+                  *, data_dir: Path | None = None, db=None) -> "Session | None":
         """从命名存档恢复 session。
 
         Returns:
             Session 对象，存档不存在返回 None
         """
+        if db is not None:
+            # 数据库模式：从快照恢复
+            result = db.load_snapshot(session_id, save_name)
+            if result is None:
+                return None
+            state, history_list = result
+            session = cls(session_id, data_dir=data_dir or SESSIONS_DIR, db=db)
+            session.state = state
+            session._history_list = history_list
+            log.info("读档: %s/%s (第 %d 轮)", session_id, save_name, state.turn_count)
+            return session
+
+        # JSON 模式
         save_dir = DATA_DIR / "saves" / session_id / save_name
         state_path = save_dir / "state.json"
         if not state_path.is_file():
             log.warning("存档不存在: %s/%s", session_id, save_name)
             return None
 
-        # 创建 session 并从存档恢复
         session = cls(session_id, data_dir=data_dir or SESSIONS_DIR)
         loaded = GameState.load(state_path)
         if loaded is None:
             return None
         session.state = loaded
 
-        # 恢复对话历史
         history_path = save_dir / "history.jsonl"
         if history_path.is_file():
             import shutil
             session._history_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(history_path, session._history_path)
-            session.history = HistoryStore(session._history_path)
+            session._history_store = HistoryStore(session._history_path)
 
         log.info("读档: %s/%s (第 %d 轮, %d 条历史)",
                  session_id, save_name, session.state.turn_count, session.history.count())
         return session
 
     @staticmethod
-    def delete_save(session_id: str, name: str) -> bool:
+    def delete_save(session_id: str, name: str, *, db=None) -> bool:
         """删除命名存档。"""
+        if db is not None:
+            return db.delete_snapshot(session_id, name)
         import shutil
         save_dir = DATA_DIR / "saves" / session_id / name
         if save_dir.is_dir():

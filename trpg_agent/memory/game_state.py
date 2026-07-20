@@ -156,7 +156,10 @@ class GameState:
 
     system: str = "coc_7e"
     session_id: str = ""
-    location: str = ""                          # 当前场景
+    location: str = ""                          # 当前场景位置（自由文字）
+    scene_id: str = ""                          # 模组场景 ID（结构化剧情追踪）
+    adventure_id: str = ""                      # 当前加载的模组 ID
+    resolved_elements: set[str] = field(default_factory=set)  # 已解决的元素 ID
     investigators: list[Investigator] = field(default_factory=list)
     npcs: list[Npc] = field(default_factory=list)
     quests: list[Quest] = field(default_factory=list)
@@ -170,6 +173,9 @@ class GameState:
             "system": self.system,
             "session_id": self.session_id,
             "location": self.location,
+            "scene_id": self.scene_id,
+            "adventure_id": self.adventure_id,
+            "resolved_elements": sorted(self.resolved_elements),
             "investigators": [c.to_dict() for c in self.investigators],
             "npcs": [n.to_dict() for n in self.npcs],
             "quests": [q.to_dict() for q in self.quests],
@@ -183,6 +189,9 @@ class GameState:
             system=str(d.get("system", "coc_7e") or "coc_7e"),
             session_id=str(d.get("session_id", "") or ""),
             location=str(d.get("location", "") or ""),
+            scene_id=str(d.get("scene_id", "") or ""),
+            adventure_id=str(d.get("adventure_id", "") or ""),
+            resolved_elements=set(d.get("resolved_elements", []) or []),
             investigators=[Investigator.from_dict(c) for c in d.get("investigators", []) or []],
             npcs=[Npc.from_dict(n) for n in d.get("npcs", []) or []],
             quests=[Quest.from_dict(q) for q in d.get("quests", []) or []],

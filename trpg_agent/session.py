@@ -31,6 +31,7 @@ from .rules.sanity import san_check, SanLoss, SanCheckResult
 from .rules.combat import resolve_attack, ActionType
 from .rules.luck import spend_luck
 from .rules.pushing import push_roll, can_push
+from .adventure import Adventure, Scene
 
 log = logging.getLogger(__name__)
 
@@ -212,11 +213,12 @@ class Session:
 
     # ── Prompt 组装 ────────────────────────────────
 
-    def build_system_prompt(self) -> str:
+    def build_system_prompt(self, *, adventure: Adventure | None = None) -> str:
         """组装完整的 system prompt。"""
         return assemble_system_prompt(
             persona=self._persona,
             recap=self.state.recap if self.state.recap else None,
+            adventure=self._build_adventure_block(adventure),
             state_summary=self.state.scene_summary(),
             npc_memory=self._build_npc_memory_block(),
         )
@@ -348,6 +350,83 @@ class Session:
         self.state.save(self._state_path)
         # history 在 append 时已自动写入
         log.debug("状态已保存 (第 %d 轮)", self.state.turn_count)
+
+    # ── 模组系统 ─────────────────────────────────────
+
+    def load_adventure(self, adventure_id: str) -> Adventure | None:
+        """加载模组。填充 GameState 的场景、NPC、任务。
+
+        Returns:
+            Adventure 对象，加载失败返回 None
+        """
+        adv_dir = DATA_DIR / "adventures" / adventure_id
+        adv = Adventure.load(adv_dir)
+        if adv is None:
+            return None
+
+        self.state.adventure_id = adventure_id
+        self.state.location = adv.title
+        self.state.scene_id = adv.start_scene
+        self.state.resolved_elements.clear()
+
+        # 注册模组 NPC
+        for name in adv.npc_names():
+            if not self.state.find_npc(name):
+                npc_data = adv.get_npc(name)
+                if npc_data:
+                    self.state.npcs.append(Npc(
+                        name=npc_data.name,
+                        description=npc_data.description,
+                        location=adv.start_scene,
+                    ))
+
+        log.info("模组已加载: %s (起始场景: %s, %d 个场景, %d 个 NPC)",
+                 adv.title, adv.start_scene, len(adv._scenes), len(adv._npcs))
+        return adv
+
+    def move_to_scene(self, scene_id: str, adventure: Adventure) -> Scene | None:
+        """切换到目标场景（仅限当前场景的 leads_to 列表）。
+
+        Returns:
+            目标 Scene，切换失败返回 None
+        """
+        if not adventure.can_move_to(
+            self.state.scene_id, scene_id,
+            resolved_ids=self.state.resolved_elements,
+        ):
+            log.info("场景切换被拒绝: %s → %s", self.state.scene_id, scene_id)
+            return None
+
+        scene = adventure.get_scene(scene_id)
+        if scene is None:
+            return None
+
+        self.state.scene_id = scene_id
+
+        # 更新场景 NPC 位置
+        for npc_name in scene.npcs_here:
+            npc = self.state.find_npc(npc_name)
+            if npc:
+                npc.location = scene_id
+
+        log.info("场景切换: → %s (%s)", scene_id, scene.title)
+        return scene
+
+    def resolve_element(self, element_id: str) -> bool:
+        """标记元素为已解决。"""
+        if not element_id:
+            return False
+        self.state.resolved_elements.add(element_id)
+        return True
+
+    def _build_adventure_block(self, adventure: Adventure | None = None) -> str | None:
+        """生成模组数据 prompt 块。"""
+        if adventure is None or not self.state.scene_id:
+            return None
+        return adventure.adventure_block(
+            self.state.scene_id,
+            resolved_ids=self.state.resolved_elements,
+        )
 
     # ── Phase 4: SAN / 战斗 / 幸运 / 孤注一掷 ──────────────
 

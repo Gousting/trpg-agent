@@ -22,7 +22,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from trpg_agent.session import Session
 from trpg_agent.llm.client import OllamaClient
 from trpg_agent.memory.game_state import Investigator
-from trpg_agent.mapgen import generate_map, map_to_dict, GameMap, Room
+from trpg_agent.mapgen import generate_tile_map, map_to_dict, GameMap, Room
 
 # ═══════════════════════════════════════════════════════
 # 配置
@@ -141,7 +141,7 @@ async def event_stream(host: str, kp_model: str, player_model: str, turns: int, 
     yield f"data: {json.dumps({'type': 'status', 'text': '生成地图...'}, ensure_ascii=False)}\n\n"
 
     # ── 生成地图 ──────────────────────────────────
-    gmap = generate_map(seed=seed, num_rooms=10)
+    gmap, _grid = generate_tile_map(seed=seed, num_rooms=10)
     current_room = gmap.rooms[gmap.current_room_id]
     yield f"data: {json.dumps({'type': 'map', 'map': map_to_dict(gmap)}, ensure_ascii=False)}\n\n"
 

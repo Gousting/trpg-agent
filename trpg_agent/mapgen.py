@@ -1,12 +1,19 @@
 """Roguelike 地图生成器 — 每次跑团生成不同的疗养院地图。
 
-架构：节点图（非网格）。每个房间有类型、物品、威胁、线索。
+架构：节点图 + 瓦片网格。房间矩形区域 + 走廊连接。
 """
 
 from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
+
+# 瓦片网格
+GRID_W, GRID_H = 48, 36
+TILE_FLOOR = 0
+TILE_WALL = 1
+TILE_CORRIDOR = 2
+TILE_DOOR = 3
 
 
 # ═══════════════════════════════════════════════════════
@@ -156,11 +163,17 @@ class Room:
     items: list[str] = field(default_factory=list)
     clues: list[str] = field(default_factory=list)
     threats: list[tuple[str, str]] = field(default_factory=list)
-    connections: list[str] = field(default_factory=list)  # → room_id
+    connections: list[str] = field(default_factory=list)
     visited: bool = False
     cleared: bool = False
+    # 布局
     x: float = 0.0
     y: float = 0.0
+    # 瓦片坐标
+    grid_x: int = 0
+    grid_y: int = 0
+    grid_w: int = 5
+    grid_h: int = 4
 
 
 @dataclass
@@ -311,7 +324,165 @@ def _layout(gmap: GameMap):
 
 
 # ═══════════════════════════════════════════════════════
-# 序列化（给前端）
+# 瓦片地图生成
+# ═══════════════════════════════════════════════════════
+
+ROOM_SIZES = {
+    "entrance": (6, 5), "corridor": (5, 2), "ward": (5, 4),
+    "lab": (5, 4), "morgue": (5, 4), "office": (4, 4),
+    "basement": (7, 6), "supply": (4, 4),
+}
+
+TILE_COLORS = {
+    "entrance": "#3a3020", "corridor": "#1a1815", "ward": "#1a2a1a",
+    "lab": "#1a1a2a", "morgue": "#151515", "office": "#252015",
+    "basement": "#2a0a0a", "supply": "#252015",
+}
+
+
+def generate_tile_map(seed: int | None = None, num_rooms: int = 10) -> tuple[GameMap, list[list[int]]]:
+    """生成瓦片网格地图。返回 (GameMap, grid[GRID_H][GRID_W])。
+
+    grid 值: 0=地板, 1=墙, 2=走廊, 3=门
+    """
+    if seed is not None:
+        random.seed(seed)
+
+    gmap = GameMap()
+    grid = [[TILE_WALL for _ in range(GRID_W)] for _ in range(GRID_H)]
+
+    # 1. 生成房间（不重叠放置）
+    room_id = 0
+    placed: list[tuple[int, int, int, int, str]] = []  # (gx, gy, gw, gh, rid)
+
+    # 入口在中心偏左
+    ew, eh = ROOM_SIZES["entrance"]
+    entry_gx = GRID_W // 2 - ew // 2
+    entry_gy = GRID_H // 2 - eh // 2
+    _carve_room(grid, entry_gx, entry_gy, ew, eh)
+    placed.append((entry_gx, entry_gy, ew, eh, "0"))
+
+    entry = _make_room("entrance", "0")
+    entry.grid_x, entry.grid_y = entry_gx, entry_gy
+    entry.grid_w, entry.grid_h = ew, eh
+    entry.visited = True
+    gmap.rooms["0"] = entry
+    gmap.start_room_id = "0"
+    gmap.current_room_id = "0"
+    room_id += 1
+
+    # 2. 从已放置房间向外生成新房间
+    room_types_pool = ["corridor", "ward", "lab", "office", "supply", "ward", "corridor"]
+    random.shuffle(room_types_pool)
+
+    for i in range(num_rooms - 2):
+        rtype = room_types_pool[i % len(room_types_pool)]
+        rw, rh = ROOM_SIZES.get(rtype, (4, 4))
+
+        # 选一个已放置房间，从它的一侧生成
+        for attempt in range(20):
+            parent = random.choice(placed)
+            px, py, pw, ph, _ = parent
+            side = random.choice(["north", "south", "east", "west"])
+            gap = random.randint(2, 4)
+
+            if side == "north":
+                gx = px + random.randint(0, max(0, pw - rw))
+                gy = py - rh - gap
+            elif side == "south":
+                gx = px + random.randint(0, max(0, pw - rw))
+                gy = py + ph + gap
+            elif side == "east":
+                gx = px + pw + gap
+                gy = py + random.randint(0, max(0, ph - rh))
+            else:  # west
+                gx = px - rw - gap
+                gy = py + random.randint(0, max(0, ph - rh))
+
+            gx = max(1, min(GRID_W - rw - 1, gx))
+            gy = max(1, min(GRID_H - rh - 1, gy))
+
+            if _can_place(grid, gx, gy, rw, rh):
+                _carve_room(grid, gx, gy, rw, rh)
+                rid_str = str(room_id)
+                placed.append((gx, gy, rw, rh, rid_str))
+
+                room = _make_room(rtype, rid_str)
+                room.grid_x, room.grid_y = gx, gy
+                room.grid_w, room.grid_h = rw, rh
+                gmap.rooms[rid_str] = room
+
+                # 连接走廊
+                _carve_corridor(grid, px + pw // 2, py + ph // 2, gx + rw // 2, gy + rh // 2)
+                _connect(gmap.rooms[parent[4]], room)
+                room_id += 1
+                break
+
+    # Boss 房（最远的角落）
+    rw, rh = ROOM_SIZES["basement"]
+    farthest = max(placed, key=lambda p: abs(p[0] - entry_gx) + abs(p[1] - entry_gy))
+    fx, fy, fw, fh, fid = farthest
+
+    # 放在 farthest 的反方向
+    dx = fx - entry_gx
+    dy = fy - entry_gy
+    boss_gx = entry_gx - dx // 2
+    boss_gy = entry_gy - dy // 2
+    boss_gx = max(2, min(GRID_W - rw - 2, boss_gx))
+    boss_gy = max(2, min(GRID_H - rh - 2, boss_gy))
+
+    if not _can_place(grid, boss_gx, boss_gy, rw, rh):
+        # 备选：放在边缘
+        for ex, ey in [(2, 2), (GRID_W - rw - 2, 2), (2, GRID_H - rh - 2), (GRID_W - rw - 2, GRID_H - rh - 2)]:
+            if _can_place(grid, ex, ey, rw, rh):
+                boss_gx, boss_gy = ex, ey
+                break
+
+    _carve_room(grid, boss_gx, boss_gy, rw, rh)
+    boss = _make_room("basement", "_boss")
+    boss.grid_x, boss.grid_y = boss_gx, boss_gy
+    boss.grid_w, boss.grid_h = rw, rh
+    gmap.rooms["_boss"] = boss
+    gmap.boss_room_id = "_boss"
+    _carve_corridor(grid, fx + fw // 2, fy + fh // 2, boss_gx + rw // 2, boss_gy + rh // 2)
+    _connect(gmap.rooms[fid], boss)
+
+    return gmap, grid
+
+
+def _can_place(grid: list[list[int]], gx: int, gy: int, w: int, h: int) -> bool:
+    if gx < 1 or gy < 1 or gx + w >= GRID_W - 1 or gy + h >= GRID_H - 1:
+        return False
+    for y in range(gy - 1, gy + h + 1):
+        for x in range(gx - 1, gx + w + 1):
+            if 0 <= y < GRID_H and 0 <= x < GRID_W:
+                if grid[y][x] != TILE_WALL:
+                    return False
+    return True
+
+
+def _carve_room(grid: list[list[int]], gx: int, gy: int, w: int, h: int):
+    for y in range(gy, gy + h):
+        for x in range(gx, gx + w):
+            grid[y][x] = TILE_FLOOR
+
+
+def _carve_corridor(grid: list[list[int]], x1: int, y1: int, x2: int, y2: int):
+    """L 形走廊。"""
+    cx, cy = x1, y1
+    # 水平再垂直
+    while cx != x2:
+        cx += 1 if x2 > cx else -1
+        if grid[cy][cx] == TILE_WALL:
+            grid[cy][cx] = TILE_CORRIDOR
+    while cy != y2:
+        cy += 1 if y2 > cy else -1
+        if grid[cy][cx] == TILE_WALL:
+            grid[cy][cx] = TILE_CORRIDOR
+
+
+# ═══════════════════════════════════════════════════════
+# 序列化
 # ═══════════════════════════════════════════════════════
 
 def map_to_dict(gmap: GameMap) -> dict:
@@ -321,13 +492,11 @@ def map_to_dict(gmap: GameMap) -> dict:
         "boss_room_id": gmap.boss_room_id,
         "rooms": {
             rid: {
-                "id": r.id,
-                "name": r.name,
-                "type": r.room_type,
-                "x": r.x,
-                "y": r.y,
-                "visited": r.visited,
-                "cleared": r.cleared,
+                "id": r.id, "name": r.name, "type": r.room_type,
+                "x": r.x, "y": r.y,
+                "grid_x": r.grid_x, "grid_y": r.grid_y,
+                "grid_w": r.grid_w, "grid_h": r.grid_h,
+                "visited": r.visited, "cleared": r.cleared,
                 "connections": r.connections,
                 "items": r.items,
                 "threats": [t[0] for t in r.threats],

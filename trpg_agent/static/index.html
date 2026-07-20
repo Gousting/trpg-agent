@@ -54,11 +54,17 @@
   .conditions { font-size: 10px; color: #c0392b; }
   /* ── 小地图 ── */
   #minimap-box {
-    background: #111; border: 1px solid var(--border); border-radius: 6px;
-    padding: 8px; flex-shrink: 0;
+    background: #0a0a0a; border: 1px solid #222; border-radius: 4px;
+    padding: 0; flex-shrink: 0; position: relative; overflow: hidden;
   }
-  #minimap-box h3 { font-size: 11px; color: #888; margin-bottom: 6px; text-align: center; }
-  #minimap { width: 100%; height: 200px; }
+  #minimap-box h3 {
+    font-size: 11px; color: #665; margin: 0; padding: 6px 8px;
+    text-align: center; background: #111; border-bottom: 1px solid #1a1a1a;
+  }
+  #minimap {
+    width: 100%; height: 240px; display: block;
+    image-rendering: pixelated;
+  }
   /* ── 中央 ── */
   #chat {
     flex: 1; overflow-y: auto; padding: 16px 20px;
@@ -115,7 +121,7 @@
   <div id="sidebar">
     <div id="minimap-box">
       <h3>🗺️ 松林疗养院</h3>
-      <svg id="minimap" viewBox="0 0 500 400"></svg>
+      <canvas id="minimap" width="520" height="400"></canvas>
     </div>
     <div class="char-card" id="card-陈明">
       <div class="char-name" style="color:#4a90d9">🕵️ 陈明</div>
@@ -283,69 +289,165 @@ function updateRoomInfo(room) {
 }
 
 // ═══════════════════════════════════════════════════════
-// 小地图渲染
+// Canvas 暗黑地牢地图
 // ═══════════════════════════════════════════════════════
 
 const ROOM_COLORS = {
-  entrance: '#8b7355', corridor: '#555', ward: '#4a6a4a',
-  lab: '#4a5a8a', morgue: '#3a4a4a', office: '#6a5a4a',
-  basement: '#8a2020', supply: '#6a6a3a',
+  entrance: '#4a3828', corridor: '#1a1815', ward: '#1a2a18',
+  lab: '#181a28', morgue: '#151515', office: '#2a2418',
+  basement: '#2a1010', supply: '#2a2818',
 };
+
+const ROOM_GLOW = {
+  entrance: '#6a5840', corridor: '#2a2820', ward: '#2a4a28',
+  lab: '#282a48', morgue: '#252525', office: '#4a4428',
+  basement: '#4a2020', supply: '#4a4828',
+};
+
+const ROOM_ICONS = {
+  entrance: '🚪', corridor: '', ward: '🛏️', lab: '🔬',
+  morgue: '⚰️', office: '📁', basement: '💀', supply: '📦',
+};
+
+let fogAlpha = {}; // 迷雾透明度动画
 
 function drawMap() {
   if (!gmap) return;
-  const svg = document.getElementById('minimap');
-  svg.innerHTML = '';
+  const canvas = document.getElementById('minimap');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
 
-  // 画连接线
+  // 找到边界
+  let minX = 99, minY = 99, maxX = 0, maxY = 0;
+  for (const r of Object.values(gmap.rooms)) {
+    minX = Math.min(minX, r.grid_x); maxX = Math.max(maxX, r.grid_x + r.grid_w);
+    minY = Math.min(minY, r.grid_y); maxY = Math.max(maxY, r.grid_y + r.grid_h);
+  }
+  const pad = 3;
+  minX -= pad; maxX += pad; minY -= pad; maxY += pad;
+  const mapW = maxX - minX, mapH = maxY - minY;
+  const scale = Math.min(W / mapW, H / mapH);
+  const ox = (W - mapW * scale) / 2, oy = (H - mapH * scale) / 2;
+
+  const tx = (gx) => ox + (gx - minX) * scale;
+  const ty = (gy) => oy + (gy - minY) * scale;
+  const ts = (s) => s * scale;
+
+  // 背景
+  ctx.fillStyle = '#060606';
+  ctx.fillRect(0, 0, W, H);
+
+  // 走廊
+  const drawnCorridors = new Set();
   for (const [rid, room] of Object.entries(gmap.rooms)) {
     for (const cid of room.connections) {
+      const key = [rid, cid].sort().join('-');
+      if (drawnCorridors.has(key)) continue;
+      drawnCorridors.add(key);
+
       const other = gmap.rooms[cid];
-      if (!other) continue;
-      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-      line.setAttribute('x1', room.x); line.setAttribute('y1', room.y);
-      line.setAttribute('x2', other.x); line.setAttribute('y2', other.y);
-      line.setAttribute('stroke', room.visited && other.visited ? '#444' : '#222');
-      line.setAttribute('stroke-width', '1.5');
-      svg.appendChild(line);
+      if (!other || !room.visited || !other.visited) continue;
+      const cx1 = room.grid_x + room.grid_w / 2, cy1 = room.grid_y + room.grid_h / 2;
+      const cx2 = other.grid_x + other.grid_w / 2, cy2 = other.grid_y + other.grid_h / 2;
+      ctx.strokeStyle = '#1a1815';
+      ctx.lineWidth = ts(0.8);
+      ctx.beginPath();
+      ctx.moveTo(tx(cx1), ty(cy1));
+      ctx.lineTo(tx(cx2), ty(cy2));
+      ctx.stroke();
     }
   }
 
-  // 画房间
+  // 房间
   for (const [rid, room] of Object.entries(gmap.rooms)) {
-    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-    const r = room.id === gmap.current_room_id ? 14 : room.id === gmap.boss_room_id ? 13 : 10;
+    const rx = tx(room.grid_x), ry = ty(room.grid_y);
+    const rw = ts(room.grid_w), rh = ts(room.grid_h);
 
-    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-    circle.setAttribute('cx', room.x); circle.setAttribute('cy', room.y);
-    circle.setAttribute('r', r);
-    circle.setAttribute('fill', room.visited ? (ROOM_COLORS[room.type] || '#444') : '#1a1a1a');
-    circle.setAttribute('stroke', room.id === gmap.current_room_id ? '#f0c040' : '#333');
-    circle.setAttribute('stroke-width', room.id === gmap.current_room_id ? '2.5' : '1');
-    g.appendChild(circle);
-
-    // Boss 房标记
-    if (room.id === gmap.boss_room_id) {
-      const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-      txt.setAttribute('x', room.x); txt.setAttribute('y', room.y + 3);
-      txt.setAttribute('text-anchor', 'middle'); txt.setAttribute('font-size', '10');
-      txt.setAttribute('fill', '#f00'); txt.textContent = '💀';
-      g.appendChild(txt);
+    if (!room.visited) {
+      // 未探索：暗色方块
+      ctx.fillStyle = '#0d0d0d';
+      ctx.fillRect(rx + 1, ry + 1, rw - 2, rh - 2);
+      ctx.strokeStyle = '#1a1a1a';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(rx, ry, rw, rh);
+      continue;
     }
 
-    // 名称（已探索才显示）
-    if (room.visited) {
-      const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-      txt.setAttribute('x', room.x); txt.setAttribute('y', room.y - r - 3);
-      txt.setAttribute('text-anchor', 'middle'); txt.setAttribute('font-size', '8');
-      txt.setAttribute('fill', '#888');
-      txt.textContent = room.name.replace(/\(.*\)/, '');
-      g.appendChild(txt);
+    const isCurrent = room.id === gmap.current_room_id;
+    const isBoss = room.id === gmap.boss_room_id;
+    const color = ROOM_COLORS[room.type] || '#222';
+    const glow = ROOM_GLOW[room.type] || '#333';
+
+    // 房间主体
+    ctx.fillStyle = color;
+    ctx.fillRect(rx, ry, rw, rh);
+
+    // 发光效果（当前房间）
+    if (isCurrent) {
+      const grad = ctx.createRadialGradient(rx + rw/2, ry + rh/2, 0, rx + rw/2, ry + rh/2, Math.max(rw, rh) * 1.5);
+      grad.addColorStop(0, 'rgba(255,200,100,0.15)');
+      grad.addColorStop(0.5, 'rgba(255,150,50,0.05)');
+      grad.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(rx - rw, ry - rh, rw * 3, rh * 3);
     }
 
-    svg.appendChild(g);
+    // Boss 房红光脉冲
+    if (isBoss && room.visited) {
+      const pulse = 0.3 + 0.2 * Math.sin(Date.now() / 1000);
+      const bgrad = ctx.createRadialGradient(rx + rw/2, ry + rh/2, 0, rx + rw/2, ry + rh/2, Math.max(rw, rh) * 1.2);
+      bgrad.addColorStop(0, `rgba(200,30,30,${pulse})`);
+      bgrad.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = bgrad;
+      ctx.fillRect(rx - rw, ry - rh, rw * 3, rh * 3);
+    }
+
+    // 边框
+    ctx.strokeStyle = isCurrent ? '#d4a040' : isBoss ? '#802020' : '#333';
+    ctx.lineWidth = isCurrent ? 2 : 1;
+    ctx.strokeRect(rx, ry, rw, rh);
+
+    // 图标和名称
+    const icon = ROOM_ICONS[room.type] || '';
+    const fontSize = Math.max(9, ts(1.6));
+    ctx.fillStyle = '#aaa';
+    ctx.font = `${fontSize}px serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    const label = room.name.replace(/\(.*\)/, '');
+    if (rw > ts(4) && rh > ts(3)) {
+      ctx.fillText(icon, rx + rw/2, ry + rh/2 - fontSize * 0.5);
+      ctx.fillText(label, rx + rw/2, ry + rh/2 + fontSize * 0.8);
+    } else if (rw > ts(3)) {
+      ctx.fillText(label, rx + rw/2, ry + rh/2);
+    }
+  }
+
+  // 当前房间高亮环
+  const cur = gmap.rooms[gmap.current_room_id];
+  if (cur && cur.visited) {
+    const crx = tx(cur.grid_x), cry = ty(cur.grid_y);
+    const crw = ts(cur.grid_w), crh = ts(cur.grid_h);
+    ctx.strokeStyle = 'rgba(255,200,80,0.6)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 2]);
+    ctx.strokeRect(crx - 2, cry - 2, crw + 4, crh + 4);
+    ctx.setLineDash([]);
   }
 }
+
+// Boss 房脉冲动画循环
+let mapAnimId = null;
+function startMapAnimation() {
+  if (mapAnimId) return;
+  function anim() {
+    if (gmap) drawMap();
+    mapAnimId = requestAnimationFrame(anim);
+  }
+  anim();
+}
+startMapAnimation();
 </script>
 </body>
 </html>

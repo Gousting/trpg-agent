@@ -24,7 +24,7 @@ class HistoryStore:
         self._load()
 
     def _load(self) -> None:
-        """从 JSONL 文件恢复。"""
+        """从 JSONL 文件恢复。兼容旧格式（无 speaker 字段）。"""
         if not self._path.is_file():
             return
         for line in self._path.read_text(encoding="utf-8").splitlines():
@@ -36,16 +36,24 @@ class HistoryStore:
                 role = rec.get("role")
                 content = rec.get("content")
                 if role and content:
-                    self._entries.append({"role": role, "content": content})
+                    entry = {"role": role, "content": content}
+                    # speaker 可选字段（v2 新增，旧存档无此字段）
+                    if rec.get("speaker"):
+                        entry["speaker"] = rec["speaker"]
+                    self._entries.append(entry)
             except (ValueError, KeyError):
                 continue
         log.debug("从 %s 加载了 %d 条历史", self._path, len(self._entries))
 
-    def append(self, role: str, content: str) -> None:
-        """追加一条，并写入文件。"""
+    def append(self, role: str, content: str, *, speaker: str | None = None) -> None:
+        """追加一条，并写入文件。speaker 为说话人/调查员名（多人联机时使用）。"""
         ts = datetime.now(timezone.utc).isoformat()
-        record = {"ts": ts, "role": role, "content": content}
-        self._entries.append({"role": role, "content": content})
+        record: dict = {"ts": ts, "role": role, "content": content}
+        if speaker:
+            record["speaker"] = speaker
+        self._entries.append(
+            {"role": role, "content": content, **({"speaker": speaker} if speaker else {})}
+        )
 
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._path.open("a", encoding="utf-8") as fh:

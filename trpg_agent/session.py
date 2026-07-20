@@ -242,18 +242,22 @@ class Session:
             lines.append(line)
         return "\n".join(lines)
 
-    def build_messages(self, player_input: str, *, dice_context: str = "") -> list[dict[str, str]]:
+    def build_messages(self, player_input: str, *, dice_context: str = "",
+                       speaker: str | None = None) -> list[dict[str, str]]:
         """构建发给 Ollama 的消息列表。
 
         Args:
             player_input: 玩家输入
             dice_context: 检定结果（可选）
+            speaker: 说话人/调查员名（多人联机时自动加前缀）
         """
         messages = self.history.as_messages()
 
         user_msg = player_input
+        if speaker:
+            user_msg = f"[{speaker}] {player_input}"
         if dice_context:
-            user_msg = f"[检定结果] {dice_context}\n\n[调查员行动] {player_input}"
+            user_msg = f"[检定结果] {dice_context}\n\n[调查员行动] {user_msg}"
 
         messages.append({"role": "user", "content": user_msg})
         return messages
@@ -331,11 +335,17 @@ class Session:
 
     # ── 回合管理 ────────────────────────────────────
 
-    def record_turn(self, player_input: str, kp_answer: str) -> None:
+    def record_turn(self, player_input: str, kp_answer: str, *,
+                    speaker: str | None = None) -> None:
         """记录一轮对话。空回答自动填入兜底文本。
 
         KP 回复中的 <!--GS ... --> 块会被解析为游戏状态变更，
         并在存入历史前从回复中移除（玩家不可见）。
+
+        Args:
+            player_input: 玩家输入
+            kp_answer: KP 回复
+            speaker: 说话人/调查员名（多人联机时记录身份）
         """
         if not kp_answer.strip():
             kp_answer = "（KP 沉思片刻，等待着调查员的下一步行动。）"
@@ -345,7 +355,7 @@ class Session:
         from .memory.gs_parser import parse_and_apply
         kp_answer = parse_and_apply(self.state, kp_answer)
 
-        self.history.append("user", player_input)
+        self.history.append("user", player_input, speaker=speaker)
         self.history.append("assistant", kp_answer)
         self.state.turn_count += 1
 
@@ -565,6 +575,81 @@ class Session:
             "level": pushed.pushed.level.value,
             "description": pushed.description,
         }
+
+    # ── 存档系统 ─────────────────────────────────────
+
+    def save_game(self, name: str) -> Path:
+        """命名保存——将当前 session 完整复制到存档槽。
+
+        Returns:
+            存档目录路径
+        """
+        import shutil
+        save_dir = DATA_DIR / "saves" / self.session_id / name
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        # 保存状态
+        self.state.save(save_dir / "state.json")
+        # 复制对话历史
+        if self._history_path.is_file():
+            shutil.copy2(self._history_path, save_dir / "history.jsonl")
+        log.info("存档: %s/%s (第 %d 轮)", self.session_id, name, self.state.turn_count)
+        return save_dir
+
+    @classmethod
+    def list_saves(cls, session_id: str = "default") -> list[str]:
+        """列出某个 session 的所有存档名。"""
+        save_root = DATA_DIR / "saves" / session_id
+        if not save_root.is_dir():
+            return []
+        return sorted(
+            d.name for d in save_root.iterdir()
+            if d.is_dir() and (d / "state.json").is_file()
+        )
+
+    @classmethod
+    def load_game(cls, session_id: str, save_name: str,
+                  *, data_dir: Path | None = None) -> "Session | None":
+        """从命名存档恢复 session。
+
+        Returns:
+            Session 对象，存档不存在返回 None
+        """
+        save_dir = DATA_DIR / "saves" / session_id / save_name
+        state_path = save_dir / "state.json"
+        if not state_path.is_file():
+            log.warning("存档不存在: %s/%s", session_id, save_name)
+            return None
+
+        # 创建 session 并从存档恢复
+        session = cls(session_id, data_dir=data_dir or SESSIONS_DIR)
+        loaded = GameState.load(state_path)
+        if loaded is None:
+            return None
+        session.state = loaded
+
+        # 恢复对话历史
+        history_path = save_dir / "history.jsonl"
+        if history_path.is_file():
+            import shutil
+            session._history_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(history_path, session._history_path)
+            session.history = HistoryStore(session._history_path)
+
+        log.info("读档: %s/%s (第 %d 轮, %d 条历史)",
+                 session_id, save_name, session.state.turn_count, session.history.count())
+        return session
+
+    @staticmethod
+    def delete_save(session_id: str, name: str) -> bool:
+        """删除命名存档。"""
+        import shutil
+        save_dir = DATA_DIR / "saves" / session_id / name
+        if save_dir.is_dir():
+            shutil.rmtree(save_dir)
+            log.info("删除存档: %s/%s", session_id, name)
+            return True
+        return False
 
     # ── 便捷方法 ────────────────────────────────────
 
